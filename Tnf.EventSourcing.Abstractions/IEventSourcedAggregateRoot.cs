@@ -7,7 +7,9 @@ namespace Tnf.EventSourcing
     {
         Guid Id { get; }
         long Version { get; }
-        IReadOnlyList<IVersionedEvent> GetPendingEvents();
-        void LoadFrom(IEnumerable<IVersionedEvent> events);
+
+        IReadOnlyList<IVersionedEvent> GetPendingChanges();
+        void ClearPendingChanges();
+        void Load(IEnumerable<IVersionedEvent> events);
     }
 }

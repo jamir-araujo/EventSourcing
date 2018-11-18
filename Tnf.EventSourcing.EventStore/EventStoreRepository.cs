@@ -4,18 +4,14 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using EventStore.ClientAPI;
+using EventStore.ClientAPI.Exceptions;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Newtonsoft.Json;
+using Tnf.EventSourcing.Abstractions;
 
 namespace Tnf.EventSourcing.EventStore
 {
-    public interface IEventSourcedRepository<TAggregateRoot>
-    {
-        Task<TAggregateRoot> GetAsync(Guid id);
-        Task SaveAsync(TAggregateRoot entity);
-    }
-
     public class EventStoreRepository<TAggregateRoot> : IEventSourcedRepository<TAggregateRoot>
         where TAggregateRoot : IEventSourcedAggregateRoot
     {
@@ -25,14 +21,17 @@ namespace Tnf.EventSourcing.EventStore
             TypeNameAssemblyFormatHandling = TypeNameAssemblyFormatHandling.Simple
         };
 
+        private readonly IEventStoreConnectionAccessor _connectionAccessor;
         private readonly IOptions<EventStoreOptions> _options;
         private readonly ILogger<EventStoreRepository<TAggregateRoot>> _logger;
         private readonly string _aggregateName;
 
         public EventStoreRepository(
+            IEventStoreConnectionAccessor connectionAccessor,
             IOptions<EventStoreOptions> options,
             ILogger<EventStoreRepository<TAggregateRoot>> logger)
         {
+            _connectionAccessor = connectionAccessor;
             _options = options;
             _logger = logger;
             _aggregateName = typeof(TAggregateRoot).Name;
@@ -42,70 +41,75 @@ namespace Tnf.EventSourcing.EventStore
         {
             TAggregateRoot aggregate = default;
 
-            using (var connection = EventStoreConnection.Create(_options.Value.ConnectionString))
+            var connection = await _connectionAccessor.GetConnectionAsync();
+
+            long start = 0;
+            int count = _options.Value.ReadingBlockSize;
+            StreamEventsSlice eventsSlice = null;
+            do
             {
-                await connection.ConnectAsync();
-
-                long start = 0;
-                StreamEventsSlice eventsSlice = null;
-                do
+                if (eventsSlice != null)
                 {
-                    if (eventsSlice != null)
-                    {
-                        start = eventsSlice.NextEventNumber;
-                    }
+                    start = eventsSlice.NextEventNumber;
+                }
 
-                    var streamName = GetStreamName(id);
-                    eventsSlice = await connection.ReadStreamEventsForwardAsync(streamName, start, 100, false);
+                var streamName = GetStreamName(id);
+                eventsSlice = await connection.ReadStreamEventsForwardAsync(streamName, start, count, false);
 
-                    if (eventsSlice.Status == SliceReadStatus.Success && aggregate == default)
+                if (eventsSlice.Status == SliceReadStatus.Success)
+                {
+                    if (aggregate == default)
                     {
                         aggregate = (TAggregateRoot)Activator.CreateInstance(typeof(TAggregateRoot), id);
                     }
-                    else
-                    {
-                        break;
-                    }
+                }
+                else
+                {
+                    break;
+                }
 
-                    aggregate.LoadFrom(Deserialize(eventsSlice.Events));
+                aggregate.Load(Deserialize(eventsSlice.Events));
 
-                } while (!eventsSlice.IsEndOfStream);
-            }
+            } while (!eventsSlice.IsEndOfStream);
 
             return aggregate;
         }
 
-        public async Task SaveAsync(TAggregateRoot entity)
+        public async Task SaveAsync(TAggregateRoot aggregate)
         {
-            using (var connection = EventStoreConnection.Create(_options.Value.ConnectionString))
+            var connection = await _connectionAccessor.GetConnectionAsync();
+
+            var streamName = GetStreamName(aggregate.Id);
+            var changeEvents = aggregate.GetPendingChanges();
+            var spectedVersion = aggregate.Version - changeEvents.Count - 1;
+
+            if (spectedVersion <= 0)
             {
-                await connection.ConnectAsync();
+                spectedVersion = ExpectedVersion.NoStream;
+            }
 
-                var streamName = GetStreamName(entity.Id);
-                var events = entity.GetPendingEvents();
-                var spectedVersion = entity.Version - events.Count;
-
-                if (spectedVersion <= 0)
+            using (var transaction = await connection.StartTransactionAsync(streamName, spectedVersion))
+            {
+                try
                 {
-                    spectedVersion = ExpectedVersion.NoStream;
+                    await transaction.WriteAsync(changeEvents.Select(ToEventData));
+
+                    //publish events to event bus here
+
+                    await transaction.CommitAsync();
+
+                    aggregate.ClearPendingChanges();
                 }
-
-                using (var transaction = await connection.StartTransactionAsync(streamName, spectedVersion))
+                catch (WrongExpectedVersionException exception)
                 {
-                    try
-                    {
-                        await transaction.WriteAsync(events.Select(ToEventData));
-
-                        //publish events to event bus here
-
-                        await transaction.CommitAsync();
-                    }
-                    catch (Exception e)
-                    {
-                        _logger?.LogError(e, e.Message);
-                        transaction.Rollback();
-                        throw;
-                    }
+                    _logger?.LogError(exception, exception.Message);
+                    throw new ConcurrentChangeException(aggregate.Id, _aggregateName, exception);
+                }
+                catch (Exception exception)
+                {
+                    _logger?.LogError(exception, exception.Message);
+                    transaction.Rollback();
+                    throw;
                 }
             }
         }

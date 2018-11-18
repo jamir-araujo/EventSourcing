@@ -1,28 +1,21 @@
 ﻿using System;
 using System.Threading.Tasks;
-using Microsoft.Extensions.Options;
+using Microsoft.EntityFrameworkCore;
+using Tnf.EventSourcing.EntityFrameworkCore.SqlServer;
 using Xunit;
 
-namespace Tnf.EventSourcing.EventStore.Tests
+namespace Tnf.EventSourcing.EntityFrameworkCore.Tests
 {
-    public class EventStoreRepositoryTests
+    public class EventSourcedEFCoreRepositoryTests
     {
-        private EventStoreRepository<Cash> _repository;
-        private EventStoreOptions _eventStoreOptions;
+        private EventSourcedEFCoreRepository<Cash> _repository;
 
-        public EventStoreRepositoryTests()
+        public EventSourcedEFCoreRepositoryTests()
         {
-            _eventStoreOptions = new EventStoreOptions
-            {
-                ReadingBlockSize = 4,
-                ConnectionString = "ConnectTo=tcp://test:1234@localhost:1113"
-            };
+            var builder = new DbContextOptionsBuilder<SqlServerEventsDbContext>();
+            builder.UseSqlServer("Data Source=(localdb)\\mssqllocaldb;DataBase=EventsDatabase");
 
-            var options = Options.Create(_eventStoreOptions);
-
-            var eventStoreConnectionAccessor = new EventStoreConnectionAccessor(options);
-
-            _repository = new EventStoreRepository<Cash>(eventStoreConnectionAccessor, options, null);
+            _repository = new EventSourcedEFCoreRepository<Cash>(new SqlServerEventsDbContext(builder.Options));
         }
 
         [Fact]

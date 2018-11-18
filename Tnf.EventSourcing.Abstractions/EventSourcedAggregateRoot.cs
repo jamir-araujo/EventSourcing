@@ -6,10 +6,9 @@ namespace Tnf.EventSourcing
     public abstract class EventSourcedAggregateRoot : IEventSourcedAggregateRoot
     {
         private Dictionary<Type, Action<IVersionedEvent>> _handlers = new Dictionary<Type, Action<IVersionedEvent>>();
-        private readonly List<IVersionedEvent> _pendingEvents = new List<IVersionedEvent>();
+        private readonly List<IVersionedEvent> _pendingChanges = new List<IVersionedEvent>();
 
         public Guid Id { get; private set; }
-
         public long Version { get; private set; }
 
         protected EventSourcedAggregateRoot(Guid id)
@@ -17,12 +16,11 @@ namespace Tnf.EventSourcing
             Id = id;
         }
 
-        public IReadOnlyList<IVersionedEvent> GetPendingEvents()
-        {
-            return _pendingEvents.AsReadOnly();
-        }
+        IReadOnlyList<IVersionedEvent> IEventSourcedAggregateRoot.GetPendingChanges() => _pendingChanges.AsReadOnly();
 
-        public void LoadFrom(IEnumerable<IVersionedEvent> events)
+        void IEventSourcedAggregateRoot.ClearPendingChanges() => _pendingChanges.Clear();
+
+        void IEventSourcedAggregateRoot.Load(IEnumerable<IVersionedEvent> events)
         {
             foreach (var @event in events)
             {
@@ -45,7 +43,7 @@ namespace Tnf.EventSourcing
             Invoke(@event);
 
             Version = @event.Version;
-            _pendingEvents.Add(@event);
+            _pendingChanges.Add(@event);
         }
 
         private void Invoke(IVersionedEvent @event)
